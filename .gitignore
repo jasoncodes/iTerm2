@@ -1,8 +1,2 @@
-.svn
-*.mode1v3
-*.mode2v3
-*.move1v3
-*.pbxuser
-*.perspective
-*.perspectivev3
-
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
