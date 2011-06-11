@@ -161,6 +161,7 @@
     path = [path stringByReplacingOccurrencesOfRegex:@":\\d+(?::.*)?$"
                                           withString:@""];
 
+    path = [path stringByExpandingTildeInPath];
     if ([path rangeOfRegex:@"^/"].location == NSNotFound) {
         path = [NSString stringWithFormat:@"%@/%@", workingDirectory, path];
     }
