@@ -52,6 +52,7 @@
 #define DEBUG_ALLOC           0
 #define DEBUG_METHOD_TRACE    0
 #define DEBUG_KEYDOWNDUMP     0
+#define ASK_ABOUT_OUTDATED_FORMAT @"AskAboutOutdatedKeyMappingForGuid%@"
 
 @implementation PTYSession
 
@@ -420,6 +421,41 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     return newOutput;
 }
 
+// This command installs the xterm-256color terminfo in the user's terminfo directory:
+// tic -e xterm-256color $FILENAME
+- (void)_maybeAskAboutInstallXtermTerminfo
+{
+    NSString* NEVER_WARN = @"NeverWarnAboutXterm256ColorTerminfo";
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:NEVER_WARN]) {
+        return;
+    }
+
+    NSString* filename = [[NSBundle bundleForClass: [self class]] pathForResource:@"xterm-terminfo" ofType:@"txt"];
+    if (!filename) {
+        return;
+    }
+    NSString* cmd = [NSString stringWithFormat:@"tic -e xterm-256color %@", filename];
+    if (system("infocmp xterm-256color")) {
+        switch (NSRunAlertPanel(@"Warning",
+                                @"The terminfo file for the terminal type you're using, \"xterm-256color\", is not installed on your system. Would you like to install it now?",
+                                @"Install",
+                                @"Never ask me again",
+                                @"Not Now",
+                                nil)) {
+            case NSAlertDefaultReturn:
+                if (system([cmd UTF8String])) {
+                    NSRunAlertPanel(@"Error",
+                                    [NSString stringWithFormat:@"Sorry, an error occurred while running: %@", cmd],
+                                    @"Ok", nil, nil);
+                }
+                break;
+            case NSAlertAlternateReturn:
+                [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:YES] forKey:NEVER_WARN];
+                break;
+        }
+    }
+}
+
 - (void)startProgram:(NSString *)program
            arguments:(NSArray *)prog_argv
          environment:(NSDictionary *)prog_env
@@ -437,6 +473,9 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 #endif
     if ([env objectForKey:TERM_ENVNAME] == nil)
         [env setObject:TERM_VALUE forKey:TERM_ENVNAME];
+    if ([[env objectForKey:TERM_ENVNAME] isEqualToString:@"xterm-256color"]) {
+        [self _maybeAskAboutInstallXtermTerminfo];
+    }
 
     if ([env objectForKey:COLORFGBG_ENVNAME] == nil && COLORFGBG_VALUE != nil)
         [env setObject:COLORFGBG_VALUE forKey:COLORFGBG_ENVNAME];
@@ -476,6 +515,13 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
             }
         }
     }
+}
+
+// Terminate a replay session but not the live session
+- (void)softTerminate
+{
+    liveSession_ = nil;
+    [self terminate];
 }
 
 - (void)terminate
@@ -591,9 +637,14 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [[ProcessCache sharedInstance] notifyNewOutput];
 }
 
+- (BOOL)_growlOnForegroundTabs
+{
+    return [[[NSUserDefaults standardUserDefaults] objectForKey:@"GrowlOnForegroundTabs"] boolValue];
+}
+
 - (void)brokenPipe
 {
-    if ([SCREEN growl] && ![[self tab] isForegroundTab]) {
+    if ([SCREEN growl] && (![[self tab] isForegroundTab] || [self _growlOnForegroundTabs])) {
         [gd growlNotify:@"Session Ended"
             withDescription:[NSString stringWithFormat:@"Session \"%@\" in tab #%d just terminated.",
                              [self name],
@@ -611,7 +662,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     }
 }
 
-- (BOOL)hasActionableKeyMappingForEvent:(NSEvent *)event
+- (int)_keyBindingActionForEvent:(NSEvent*)event
 {
     unsigned int modflag;
     NSString *unmodkeystr;
@@ -631,13 +682,31 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     */
 
     // Check if we have a custom key mapping for this event
-
     keyBindingAction = [iTermKeyBindingMgr actionForKeyCode:unmodunicode
                                                   modifiers:modflag
                                                        text:&keyBindingText
                                                 keyMappings:[[self addressBookEntry] objectForKey: KEY_KEYBOARD_MAP]];
+    return keyBindingAction;
+}
 
+- (BOOL)hasTextSendingKeyMappingForEvent:(NSEvent*)event
+{
+    int keyBindingAction = [self _keyBindingActionForEvent:event];
+    switch (keyBindingAction) {
+        case KEY_ACTION_ESCAPE_SEQUENCE:
+        case KEY_ACTION_HEX_CODE:
+        case KEY_ACTION_TEXT:
+        case KEY_ACTION_IGNORE:
+        case KEY_ACTION_SEND_C_H_BACKSPACE:
+        case KEY_ACTION_SEND_C_QM_BACKSPACE:
+            return YES;
+    }
+    return NO;
+}
 
+- (BOOL)hasActionableKeyMappingForEvent:(NSEvent *)event
+{
+    int keyBindingAction = [self _keyBindingActionForEvent:event];
     return (keyBindingAction >= 0) && (keyBindingAction != KEY_ACTION_DO_NOT_REMAP_MODIFIERS) && (keyBindingAction != KEY_ACTION_REMAP_LOCALLY);
 }
 
@@ -653,6 +722,12 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 - (BOOL)_askAboutOutdatedKeyMappings
 {
     NSNumber* n = [addressBookEntry objectForKey:KEY_ASK_ABOUT_OUTDATED_KEYMAPS];
+    if (!n) {
+        n = [[NSUserDefaults standardUserDefaults] objectForKey:[NSString stringWithFormat:ASK_ABOUT_OUTDATED_FORMAT, [addressBookEntry objectForKey:KEY_GUID]]];
+        if (!n && [addressBookEntry objectForKey:KEY_ORIGINAL_GUID]) {
+            n = [[NSUserDefaults standardUserDefaults] objectForKey:[NSString stringWithFormat:ASK_ABOUT_OUTDATED_FORMAT, [addressBookEntry objectForKey:KEY_ORIGINAL_GUID]]];
+        }
+    }
     return n ? [n boolValue] : YES;
 }
 
@@ -690,6 +765,14 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [model setObject:[NSNumber numberWithBool:NO]
                                        forKey:KEY_ASK_ABOUT_OUTDATED_KEYMAPS
                                    inBookmark:addressBookEntry];
+    [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:NO]
+                                              forKey:[NSString stringWithFormat:ASK_ABOUT_OUTDATED_FORMAT,
+                                                      [addressBookEntry objectForKey:KEY_GUID]]];
+    if ([addressBookEntry objectForKey:KEY_ORIGINAL_GUID]) {
+        [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:NO]
+                                                  forKey:[NSString stringWithFormat:ASK_ABOUT_OUTDATED_FORMAT,
+                                                          [addressBookEntry objectForKey:KEY_ORIGINAL_GUID]]];
+    }
     [PTYSession reloadAllBookmarks];
 }
 
@@ -2404,6 +2487,9 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
 - (void)scheduleUpdateIn:(NSTimeInterval)timeout
 {
+    if (EXIT) {
+        return;
+    }
     float kEpsilon = 0.001;
     if (!timerRunning_ &&
         [updateTimer isValid] &&
